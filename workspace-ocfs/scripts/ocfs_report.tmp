@@ -1,0 +1,28 @@
+📖 **OCFS READ**: `system-prompt-patch.md`
+
+# OCFS Protocol Specification (v2.1.0)
+
+## 核心准则
+- **目录限制**：所有操作仅限 `$OPENCLAW_HOME/github/text/` 目录。
+- **事件驱动**：基于 `fs.watch` 监听，严禁轮询。
+- **原子性**：单次任务建议使用单个 `ocfs` 代码块。
+
+## 指令集
+1. **基础操作**
+   - `ls:.` : 列出当前目录下所有文件。
+   - `write:path` : 覆盖或创建文件（支持全文本）。
+   - `read:path` : 读取全文件。
+   - `append:path` : 追加内容。
+
+2. **高级读取**
+   - `read:path#Heading` : 按 Markdown 标题精准读取。
+   - `read:path@start-end` : 按行号范围读取。
+   - `outline:path` : 提取文件大纲（标题及行号）。
+   - `grep:path|regex` : 正则搜索文件内容。
+
+3. **外部集成**
+   - `gsearch:Topic | Keywords | ShowURL(bool)` : 异步 Google 深度调研。
+   - `webfetch:URL` : 抓取并解析网页内容为 Markdown。
+
+## 反馈机制
+所有成功执行的操作均会触发 `[OCFS-SYSTEM-NOTIFICATION]` 反馈。若报错请检查路径合法性。
