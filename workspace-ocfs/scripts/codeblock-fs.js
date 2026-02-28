@@ -20,7 +20,7 @@ const {
 const BASE_DIR = process.env.OCFS_WORKSPACE_DIR || '/home/node/.openclaw/workspace-ocfs';
 
 // OpenClaw CLI 命令前缀：Docker 中用 node /app/dist/index.js，非 Docker 用 openclaw
-const OPENCLAW_CMD = fs.existsSync('/app/dist/index.js') ? 'node /app/dist/index.js' : 'openclaw';
+const OPENCLAW_CMD = 'openclaw';
 const CACHE_FILE = '/tmp/ocfs_processed.ids';
 
 // 持久化消息去重
@@ -121,29 +121,32 @@ function processMessage(rawLine, sessionKey, agentId) {
     }
 }
 
-async function handleNativeTool(sessionKey, toolName, argsObj, sendFeedback) {
-    let token = process.env.OPENCLAW_GATEWAY_TOKEN;
+async function handleNativeTool(sessionKey, toolName, argsObj, sendFeedback, agentId = 'ocfs-specialist') {
+    let token = process.env.OPENCLAW_GATEWAY_TOKEN || process.env.OPENCLAW_GATEWAY_PASSWORD;
     if (!token) {
         try {
             const stateDir = process.env.OPENCLAW_STATE_DIR || '/home/node/.openclaw';
             const cfgText = fs.readFileSync(path.join(stateDir, 'openclaw.json'), 'utf8');
-            const match = cfgText.match(/token:\s*['"]([^'"]+)['"]/);
+            const match = cfgText.match(/["']?(?:token|password)["']?\s*:\s*["']([^"']+)["']/);
             if (match) token = match[1];
         } catch (e) { }
     }
 
     try {
+        const formattedSessionKey = sessionKey.startsWith('agent:') ? sessionKey : `agent:${agentId}:${sessionKey}`;
+        const payload = {
+            tool: toolName,
+            args: argsObj,
+            sessionKey: formattedSessionKey
+        };
+
         const response = await fetch('http://127.0.0.1:18789/tools/invoke', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 ...(token ? { 'Authorization': `Bearer ${token}` } : {})
             },
-            body: JSON.stringify({
-                tool: toolName,
-                args: argsObj,
-                sessionKey: sessionKey
-            })
+            body: JSON.stringify(payload)
         });
         const result = await response.json();
         if (response.ok && result.ok) {
@@ -341,6 +344,16 @@ async function executeOcfs(text, sessionKey, agentId = 'ocfs-specialist') {
                 console.log(`[OCFS] Notice: 文件操作目标在默认工作目录之外 (${target})`);
             }
 
+            // OpenClaw CLI 全部可用命令白名单 (与 OpenClaw Router 对齐)
+            const openclawCoreCommands = [
+                'setup', 'onboard', 'configure', 'config', 'doctor', 'dashboard', 'reset', 'uninstall',
+                'message', 'memory', 'agent', 'agents', 'status', 'health', 'sessions', 'browser',
+                'acp', 'gateway', 'daemon', 'logs', 'system', 'models', 'approvals', 'nodes', 'devices',
+                'node', 'sandbox', 'tui', 'cron', 'dns', 'docs', 'hooks', 'webhooks', 'qr', 'clawbot',
+                'pairing', 'plugins', 'channels', 'directory', 'security', 'secrets', 'skills',
+                'update', 'completion'
+            ];
+
             if (action === 'write') {
                 let backupMsg = '';
 
@@ -395,27 +408,53 @@ async function executeOcfs(text, sessionKey, agentId = 'ocfs-specialist') {
             }
             // exec 直接执行
             else if (action === 'exec') await handleExec(sessionKey, content, null, localSendFeedback);
-            // OpenClaw CLI 桥接：工具名直接映射到 openclaw <command> <args>
-            else if (action === 'browser') await handleExec(sessionKey, `${OPENCLAW_CMD} browser ${target}`, null, localSendFeedback);
-            else if (action === 'message') await handleExec(sessionKey, `${OPENCLAW_CMD} message ${target}`, null, localSendFeedback);
-            else if (action === 'cron') await handleExec(sessionKey, `${OPENCLAW_CMD} cron ${target}`, null, localSendFeedback);
-            else if (action === 'nodes') await handleExec(sessionKey, `${OPENCLAW_CMD} nodes ${target}`, null, localSendFeedback);
+            // OpenClaw CLI 桥接：特制覆写与向后兼容别名
+            else if (action === 'message') await handleExec(sessionKey, `${OPENCLAW_CMD} message ${target}`, null, localSendFeedback, { timeout: 300000, hideEcho: true });
+            else if (action === 'sessions_send') await handleExec(sessionKey, `${OPENCLAW_CMD} agent ${target}`, null, localSendFeedback, { timeout: 300000, hideEcho: true });
             else if (action === 'sessions_list') await handleExec(sessionKey, `${OPENCLAW_CMD} sessions ${target}`, null, localSendFeedback);
-            else if (action === 'sessions_send') await handleExec(sessionKey, `${OPENCLAW_CMD} agent ${target}`, null, localSendFeedback);
             else if (action === 'sessions_history') await handleExec(sessionKey, `${OPENCLAW_CMD} sessions ${target}`, null, localSendFeedback);
-            else if (action === 'sessions_spawn') await handleExec(sessionKey, `${OPENCLAW_CMD} agent ${target}`, null, localSendFeedback);
+            else if (action === 'sessions_spawn') {
+                let targetAgentId;
+                let task = target;
+                const agentMatch = target.match(/--agent\s+([^\s"']+)/);
+                if (agentMatch) {
+                    targetAgentId = agentMatch[1];
+                    task = task.replace(agentMatch[0], '');
+                }
+                const msgMatch = task.match(/--message\s+([\s\S]+)$/);
+                if (msgMatch) {
+                    task = msgMatch[1];
+                } else {
+                    task = task.replace(/--message\s*/, '');
+                }
+                task = task.trim();
+
+                // 去除可能存在的最外层引号包裹
+                if ((task.startsWith('"') && task.endsWith('"')) || (task.startsWith("'") && task.endsWith("'"))) {
+                    task = task.substring(1, task.length - 1);
+                }
+
+                const argsObj = { task };
+                if (targetAgentId) argsObj.agentId = targetAgentId;
+                // 注意：第五个参数必须传外部的 agentId（作为真正的呼叫源，也就是 ocfs-specialist 等）
+                // argsObj.agentId 才是要分派过去的子智能体（如 ops、main 等）
+                await handleNativeTool(sessionKey, 'sessions_spawn', argsObj, localSendFeedback, agentId);
+            }
             else if (action === 'session_status') await handleExec(sessionKey, `${OPENCLAW_CMD} status ${target}`, null, localSendFeedback);
             // subagents 工具并不是 openclaw agents cli，而是原生 subagents!
             else if (action === 'subagents') {
                 const subArgs = target.split(' ');
                 const subCmd = subArgs[0]; // status, abort
                 const subTarget = subArgs.slice(1).join(' '); // [id]
-                await handleNativeTool(sessionKey, 'subagents', { action: subCmd, target: subTarget }, localSendFeedback);
+                await handleNativeTool(sessionKey, 'subagents', { action: subCmd, target: subTarget }, localSendFeedback, agentId);
             }
             else if (action === 'memory_search') await handleExec(sessionKey, `${OPENCLAW_CMD} memory search ${target}`, null, localSendFeedback);
-            else if (action === 'web_fetch') await handleNativeTool(sessionKey, 'web_fetch', { url: target.split('|')[0].trim() }, localSendFeedback);
-            else if (action === 'web_search') await handleNativeTool(sessionKey, 'web_search', { query: target }, localSendFeedback);
-            else if (action === 'apply_patch') await handleExec(sessionKey, `echo '${content.replace(/'/g, "'\\''")}' | ${OPENCLAW_CMD} apply-patch`, null, localSendFeedback);
+            else if (openclawCoreCommands.includes(action)) await handleExec(sessionKey, `${OPENCLAW_CMD} ${action} ${target}`, null, localSendFeedback);
+
+            // OCFS 内部功能与代理调用
+            else if (action === 'web_fetch') await handleNativeTool(sessionKey, 'web_fetch', { url: target.split('|')[0].trim() }, localSendFeedback, agentId);
+            else if (action === 'web_search') await handleNativeTool(sessionKey, 'web_search', { query: target }, localSendFeedback, agentId);
+
             // VCP 插件
             else if (vcpNames.includes(action)) await handleVcpPlugin(sessionKey, action, target, localSendFeedback);
             else {

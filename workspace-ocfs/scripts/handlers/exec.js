@@ -7,28 +7,35 @@ const execAsync = util.promisify(exec);
 const NODE_HOME = process.env.OCFS_SYSTEM_HOME || '/home/node';
 const HOME_DIR = NODE_HOME;
 // Docker 兼容：自动将 openclaw 替换为 node /app/dist/index.js
-const OPENCLAW_CMD = fs.existsSync('/app/dist/index.js') ? 'node /app/dist/index.js' : 'openclaw';
+const OPENCLAW_CMD = 'openclaw';
 
 // 清理 ANSI 色彩转义码的正则
 const ANSI_REGEX = /\x1B\[[0-?]*[ -/]*[@-~]/g;
 
-async function handleExec(sessionKey, command, meta, sendFeedback) {
+async function handleExec(sessionKey, command, meta, sendFeedback, options = {}) {
     if (!command.trim()) {
         sendFeedback(sessionKey, `❌ **OCFS Error**: 没有提供需要执行的命令。`);
         return;
     }
 
+    const { timeout = 60000, hideEcho = false } = options;
+
     // 自动替换 openclaw 命令为环境兼容版本
     const resolvedCommand = command.replace(/^openclaw\b/, OPENCLAW_CMD);
 
     console.log(`[OCFS] Executing command: ${resolvedCommand}`);
-    let result = `💻 **OCFS EXEC**:\n\`\`\`bash\n${command}\n\`\`\`\n\n`;
+    let result = '';
+    if (!hideEcho) {
+        result = `💻 **OCFS EXEC**:\n\`\`\`bash\n${command}\n\`\`\`\n\n`;
+    } else {
+        result = `💻 **OCFS EXEC** (Hide Command Echo):\n\n`;
+    }
 
     try {
-        // 设置执行超时 60s，强制剥离色彩环境变量，避免输出乱码
+        // 设置执行超时 60s 或自定义选项，强制剥离色彩环境变量，避免输出乱码
         const { stdout, stderr } = await execAsync(resolvedCommand, {
             cwd: HOME_DIR,
-            timeout: 60000,
+            timeout: timeout,
             env: { ...process.env, TERM: 'dumb', FORCE_COLOR: '0', NO_COLOR: '1' }
         });
 

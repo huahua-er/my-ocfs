@@ -100,7 +100,7 @@
    ```
 
 4. **重启你的 OpenClaw Gateway**
-   随着网关的启动发出的 `gateway:startup` 钩子，`ocfs-boot` 中的 Handler 会自动激活后台 Daemon 进程，并在控制台打出带有 `[ocfs/boot]` 颜色的日志，表示底座就绪。
+   随着网关的启动发出的 `gateway:startup` 钩子，`ocfs-boot` 中的 Handler 会自动激活后台 Daemon 进程，并在控制台打出带有 `[ocfs/boot]` 的日志，表示底座就绪。
 
 ## 🤖 智能体（Agent）认知注入
 
