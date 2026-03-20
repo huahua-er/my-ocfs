@@ -7,10 +7,10 @@ const BASE_DIR = process.env.OCFS_WORKSPACE_DIR || path.join(NODE_HOME, '.opencl
 // 清理 ANSI 色彩转义码的正则
 const ANSI_REGEX = /\x1B\[[0-?]*[ -/]*[@-~]/g;
 
-function handleList(sessionKey, targetPath, meta, sendFeedback) {
+function handleList(sessionKey, targetPath, meta, sendFeedback, baseDir) {
     try {
         const subPath = (targetPath && targetPath !== '.' && targetPath !== './') ? targetPath : '';
-        const resolvedPath = path.resolve(BASE_DIR, subPath);
+        const resolvedPath = path.resolve(baseDir || BASE_DIR, subPath);
 
         if (!fs.existsSync(resolvedPath)) {
             return sendFeedback(sessionKey, `❌ **OCFS Error**: 找不到目录 \`${subPath || '.'}\``);
@@ -61,10 +61,10 @@ function handleList(sessionKey, targetPath, meta, sendFeedback) {
     }
 }
 
-function handleRead(sessionKey, targetExpr, meta, sendFeedback) {
+function handleRead(sessionKey, targetExpr, meta, sendFeedback, baseDir) {
     try {
         let [targetPath, fragment] = targetExpr.split(/[#@]/);
-        const fullPath = path.resolve(BASE_DIR, targetPath);
+        const fullPath = path.resolve(baseDir || BASE_DIR, targetPath);
         if (!fs.existsSync(fullPath)) return sendFeedback(sessionKey, `❌ **OCFS Error**: File not found \`${targetPath}\``);
         let content = fs.readFileSync(fullPath, 'utf8').replace(ANSI_REGEX, '');
         let lines = content.split('\n');
@@ -91,19 +91,19 @@ function handleRead(sessionKey, targetExpr, meta, sendFeedback) {
     } catch (e) { sendFeedback(sessionKey, `❌ **OCFS Error**: ${e.message}`); }
 }
 
-function handleOutline(sessionKey, targetPath, meta, sendFeedback) {
+function handleOutline(sessionKey, targetPath, meta, sendFeedback, baseDir) {
     try {
-        const fullPath = path.resolve(BASE_DIR, targetPath);
+        const fullPath = path.resolve(baseDir || BASE_DIR, targetPath);
         if (!fs.existsSync(fullPath)) return sendFeedback(sessionKey, `❌ **OCFS Error**: File not found \`${targetPath}\``);
         const outline = fs.readFileSync(fullPath, 'utf8').split('\n').map((line, index) => line.startsWith('#') ? `${index + 1}. ${line}` : null).filter(Boolean);
         sendFeedback(sessionKey, `Outline for \`${targetPath}\`:\n\n` + (outline.join('\n') || "_No headings found._"));
     } catch (e) { sendFeedback(sessionKey, `❌ **OCFS Error**: ${e.message}`); }
 }
 
-function handleGrep(sessionKey, targetExpr, meta, sendFeedback) {
+function handleGrep(sessionKey, targetExpr, meta, sendFeedback, baseDir) {
     try {
         const [targetPath, pattern] = targetExpr.split('|');
-        const fullPath = path.resolve(BASE_DIR, targetPath);
+        const fullPath = path.resolve(baseDir || BASE_DIR, targetPath);
         if (!fs.existsSync(fullPath)) return sendFeedback(sessionKey, `❌ **OCFS Error**: File not found \`${targetPath}\``);
         const content = fs.readFileSync(fullPath, 'utf8').replace(ANSI_REGEX, '');
         const matches = content.split('\n').map((line, index) => new RegExp(pattern, 'i').test(line) ? `${index + 1}: ${line}` : null).filter(Boolean);

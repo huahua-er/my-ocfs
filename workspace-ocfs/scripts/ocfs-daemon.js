@@ -159,7 +159,8 @@ function watchDirectory(dirObj) {
     const { path: dirPath, agentId } = dirObj;
     if (activeWatchers.has(dirPath)) return;
 
-    if (agentId !== 'ocfs-specialist') return;
+    const allowedAgents = process.env.OCFS_ALLOWED_AGENTS ? process.env.OCFS_ALLOWED_AGENTS.split(',') : ['ocfs-specialist'];
+    if (!allowedAgents.includes(agentId)) return;
 
     const pendingNewFiles = new Map(); // filename -> timer (防止 fs.watch 对新文件触发多个事件)
 

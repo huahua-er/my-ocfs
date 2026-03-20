@@ -2,3 +2,10 @@
 docs
 workspace-clawhub
 config.env
+node_modules/
+workspace-ocfs/node_modules/
+test*.json
+test*.jsonl
+.DS_Store
+.env*
+!workspace-ocfs/config.env.example

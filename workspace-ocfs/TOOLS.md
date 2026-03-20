@@ -4,88 +4,102 @@
 
 ## 完整工具列表 [[[使用前 认真 完整 阅读 ## 核心定位]]]
 
-### 文件系统（OCFS 直接实现）
+### OpenClaw 核心工具（与 tool-catalog 对齐）
+
+以下工具与 OpenClaw 原生工具目录完全对齐，通过 OCFS 代码块或 Gateway API 调用。
+
+#### Files（文件系统）
+| 工具名 | 说明 | 示例 |
+|--------|------|------|
+| `read` | 读取文件 | `read:file.md` `read:file.md@10-20` `read:file.md#标题` |
+| `write` | 创建/覆写文件（自动备份） | `write:file.md` 后跟内容 |
+| `edit` | 搜索替换精确编辑 | `edit:file.md` 后跟 SEARCH/REPLACE |
+| `apply_patch` | OpenAI 格式补丁（Native API） | `apply_patch:file.md` 后跟 patch 内容 |
+
+#### Runtime（运行时）
+| 工具名 | 说明 | 示例 |
+|--------|------|------|
+| `exec` | 执行任意系统命令 | `exec:npm run build` |
+| `process` | 管理后台进程（Native API） | `process:list` `process:poll <sessionId>` `process:kill <sessionId>` |
+
+#### Web（联网）
+| 工具名 | 说明 | 示例 |
+|--------|------|------|
+| `web_search` | OpenClaw 原生 API 网络搜索 | `web_search:关键词` |
+
+#### Memory（记忆）
+| 工具名 | 说明 | 示例 |
+|--------|------|------|
+| `memory_search` | 语义搜索记忆 | `memory_search:偏好` |
+| `memory_get` | 读取记忆文件（Native API） | `memory_get:MEMORY.md` |
+
+#### Sessions（会话管理）
+| 工具名 | 说明 | 示例 |
+|--------|------|------|
+| `sessions_list` | 列出会话 | `sessions_list:--all-agents` |
+| `sessions_history` | 会话历史 | `sessions_history:<session-id>` |
+| `sessions_send` | 发送到会话 | `sessions_send:--message "hello"` |
+| `sessions_spawn` | 派生子 Agent（Native API） | `sessions_spawn:--agent ocfs --message "任务"` |
+| `subagents` | 管理子 Agent（Native API） | `subagents:status` `subagents:abort <id>` |
+| `session_status` | 会话状态 | `session_status:--deep` |
+
+#### UI（用户界面）
+| 工具名 | 说明 | 示例 |
+|--------|------|------|
+| `browser` | 控制网页浏览器 | `browser:status` `browser:open URL` |
+| `canvas` | 控制画布（Native API） | `canvas:present URL` `canvas:navigate URL` `canvas:snapshot` |
+
+> `canvas` 支持的 action: `present`, `hide`, `navigate`, `eval`, `snapshot`, `a2ui_push`, `a2ui_reset`
+> `eval` 和 `a2ui_push` 可在后续行传递多行内容（JavaScript / JSONL）
+
+#### Messaging（消息通信）
+| 工具名 | 说明 | 示例 |
+|--------|------|------|
+| `message` | 发送多渠道消息 | `message:send --channel telegram --target ID --message "内容"` |
+
+#### Automation（自动化）
+| 工具名 | 说明 | 示例 |
+|--------|------|------|
+| `cron` | 计划任务调度 | `cron:list` `cron:add ...` |
+| `gateway` | 网关控制（Native API） | `gateway:restart reason=升级` `gateway:config.get` |
+
+> `gateway` 支持的 action: `restart`, `config.get`, `config.schema`, `config.apply`, `config.patch`, `update.run`
+> `config.apply` 和 `config.patch` 可在后续行传递多行 raw YAML 配置
+
+#### Nodes（节点）
+| 工具名 | 说明 | 示例 |
+|--------|------|------|
+| `nodes` | 管理工作节点与设备 | `nodes:list` |
+
+#### Agents
+| 工具名 | 说明 | 示例 |
+|--------|------|------|
+| `agents_list` | 列出可用 Agents（Native API） | `agents_list:` |
+
+#### Media（媒体）
+| 工具名 | 说明 | 示例 |
+|--------|------|------|
+| `image` | 图像理解分析（Native API） | `image:/path/to/img.png` 后续行可跟 prompt |
+| `tts` | 文字转语音（Native API） | `tts:要朗读的文本` |
+
+---
+
+### OCFS 扩展工具（非 OpenClaw 原生）
 
 | 工具名 | 说明 | 示例 |
 |--------|------|------|
 | `ls` | 列出目录 | `ls:.` `ls:./subdir` |
-| `read` | 读取文件 | `read:file.md` `read:file.md@10-20` `read:file.md#标题` |
-| `write` | 创建文件（自动备份） | `write:file.md` 后跟内容 |
 | `append` | 追加到文件末尾 | `append:file.md` 后跟内容 |
-| `edit` | 搜索替换 | `edit:file.md` 后跟 SEARCH/REPLACE |
 | `grep` | 正则搜索 | `grep:file.log\|ERROR` |
 | `find` | glob 查找文件 | `find:*.md` |
 | `outline` | Markdown 标题提取 | `outline:manual.md` |
-
-### OpenClaw 原生工具（CLI 桥接）
-
-你现在拥有对 OpenClaw 原生 CLI 工具树的 **全量完整访问权限**。你的调用口令直接对应 CLI 的一级子命令。
-所有命令用法均为 `命令名:参数选项`。例如：`status:--deep`，相当于在终端执行 `openclaw status --deep`。
-
-#### 1. Agent 与对话管理 (高频使用)
-| 工具名 | 说明 | 示例 |
-|--------|------|------|
-| `agent` | 执行单轮 AI Agent 对话，或测试指定 Agent | `agent:--message "hello"` |
-| `agents` | 管理隔离的 Agents（工作区、认证、路由等） | `agents:list` |
-| `sessions` | 管理与查询存储的会话日志 | `sessions:--all-agents` |
-| `status` | 查询各渠道连通性及最近操作状态 | `status:--deep` |
-| `memory` | 搜索、审查、重建长期记忆索引 | `memory:search "偏好"` |
-| `cron` | 计划任务调度管理 | `cron:list` 或 `cron:add ...` |
-| `browser` | 操控系统浏览器管理与状态 | `browser:status` 或 `browser:open URL` |
-
-#### 2. 通道与外联通信
-| 工具名 | 说明 | 示例 |
-|--------|------|------|
-| `message` | 发送、读取、管理多渠道消息 | `message:send --channel telegram --target ID ...` |
-| `channels`| 审查连接的聊天通道（Telegram, Discord等）| `channels:list` |
-| `directory`| 查找支持频道的联系人、群组ID信息 | `directory:search ...` |
-| `webhooks`| Webhook 辅助集成配置与调试 | `webhooks:status` |
-| `pairing` | 审批 DM 频道传入的安全配对请求 | `pairing:list` |
-
-#### 3. 插件、模型与扩展
-| 工具名 | 说明 | 示例 |
-|--------|------|------|
-| `models` | 发现、扫描和配置可用大模型 | `models:list` |
-| `plugins` | 检查或安装 OpenClaw 插件及扩展 | `plugins:list` |
-| `skills` | 列出或检查可用的技能树 (Skills) | `skills:list` |
-| `acp` | Agent Control Protocol (ACP) 相关测试工具 | `acp:list` |
-| `hooks` | 管理内部 Agent 生命周期的回调钩子 | `hooks:list` |
-
-#### 4. 分布式网关与系统运维 (多用于查错或深层管理)
-| 工具名 | 说明 |
-|--------|------|
-| `docs` | 搜索查询 OpenClaw 原生开发文档 (`docs:--query "architecture"`) |
-| `logs` | 通过 RPC 请求并实时截取网关底层的日志输出 |
-| `health` | 获取网关的实时运行健康检测信息 |
-| `system` | 审查系统事件、心跳以及在线状态 |
-| `nodes` | 网关管理的工作节点连通测试与下发管理 |
-| `sandbox`| Agent 环境代码安全沙盒 (Docker等) 调度控制 |
-| `security`| 审计安全与本地配置文件 |
-| `secrets` | 在运行时重载环境变量密码挂载点 |
-| `approvals`| 审批网关拦下的高危 Exec 命令请求 |
-| `update` | 检查 OpenClaw CLI 和 网关本体的安装更新 |
-
-> *备注其它内部与人工交互维护指令也均已可用，但极少由你在自动化中主动调用：`setup`, `onboard`, `configure`, `config`, `doctor`, `dashboard`, `reset`, `uninstall`, `gateway`, `daemon`, `devices`, `node`, `tui`, `dns`, `qr`, `clawbot`, `completion`*
-> *由于以上全部命令均已打通，你可以抛弃先前的 `sessions_list`、`sessions_history`、`session_status`、`memory_search` 等旧别名，直接使用对应的核心指令 `sessions:`、`status:`、`memory:`，系统会自动为你流转。*
-
-> **关于特制的高级生命周期指令：**
-> | `sessions_spawn` | OCFS/OpenClaw 原生子任务委派。非当前原生进程执行，它通过 API 派发，具备跨Agent异步等待和状态隔离！ | `sessions_spawn:--agent {agentId} --message "..."` |
-> | `subagents` | API 端点调用 （支持管理自己 Spawn 出的子代） | `subagents:status` 或 `subagents:abort <id>` |
-> | `exec` | 直接执行在主节点底层的任何 bash/系统 命令 | `exec:npm run build` |
-
-### OCFS 联网与原生网络检索工具
-
-| 工具名 | 说明 | 示例 |
-|--------|------|------|
-| `web_search` | OpenClaw 原生 API 网络搜索 (Brave/Perplexity) | `web_search:关键词` |
-| `web_fetch` | OpenClaw 原生 API 网页内容抓取 | `web_fetch:https://example.com` |
-| `ocfs_search` | OCFS 独有：AI 多关键词并发深度调研 | `ocfs_search:主题\|关键词1,关键词2\|true` |
-| `ocfs_fetch` | OCFS 独有Puppeteer爬虫。参数：`URL\|模式`<br>支持模式：<br>- `text` (默认)：提取纯净正文与多级链接<br>- `snapshot`：全页智能滚屏截图并存入 obsidian/附件<br>- `image`：直接下载远程/本地图片文件<br>自带 Stealth 隐身、自动解决 Cloudflare 盾，并支持在 config.env 传 `FETCH_COOKIES` 或代理。 | `ocfs_fetch:https://example.com\|snapshot` <br> `ocfs_fetch:URL\|text`<br> `ocfs_fetch:file:///C:/...\|image` |
-
-### VCP 插件
-动态注册，`ls:./plugins` 查看，`read:./plugins/{Command}.md` 查看用法。
+| `ocfs_search` | AI 多关键词并发深度调研 | `ocfs_search:主题\|关键词1,关键词2\|true` |
+| `ocfs_fetch` | Puppeteer 爬虫（text/snapshot/image） | `ocfs_fetch:URL\|text` `ocfs_fetch:URL\|snapshot` |
 
 > 文件操作路径相对于工作目录 `$OPENCLAW_HOME/.openclaw/workspace-ocfs` 解析（与 OpenClaw 一致）。
+
+### VCP 插件
+动态注册，`ls:/home/node/.codex/plugins/` 查看，`read:/home/node/.codex/plugins/{Command}.md` 查看用法。
 
 ---
 
@@ -114,17 +128,17 @@ const version = "2.0.0";
 >>>>
 ```ocfs
 
-#### OpenClaw CLI 桥接（直接用工具名调用）
+#### OpenClaw 核心工具
 ```ocfs
 message:send --channel telegram --target "123456789" --message "任务完成。"
 ```ocfs
 
 ```ocfs
-sessions:--all-agents --json
+sessions_list:--all-agents --json
 ```ocfs
 
 ```ocfs
-status:--deep
+session_status:--deep
 ```ocfs
 
 ```ocfs
@@ -136,7 +150,41 @@ cron:list
 ```ocfs
 
 ```ocfs
-memory:search "花儿的偏好"
+memory_search:花儿的偏好
+```ocfs
+
+```ocfs
+memory_get:MEMORY.md
+```ocfs
+
+```ocfs
+process:list
+```ocfs
+
+```ocfs
+canvas:present https://example.com
+```ocfs
+
+```ocfs
+canvas:eval
+document.title
+```ocfs
+
+```ocfs
+gateway:config.get
+```ocfs
+
+```ocfs
+agents_list:
+```ocfs
+
+```ocfs
+image:/path/to/photo.jpg
+描述这张图片的内容
+```ocfs
+
+```ocfs
+tts:你好世界，这是语音测试
 ```ocfs
 
 也可以通过 exec 调用任意命令：

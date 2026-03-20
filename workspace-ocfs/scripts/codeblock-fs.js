@@ -17,7 +17,7 @@ const {
     handleExec
 } = require('./ocfs-handlers.js');
 
-const BASE_DIR = process.env.OCFS_WORKSPACE_DIR || '/home/node/.openclaw/workspace-ocfs';
+// OCFS 根工作目录（已改为基于 agentId 动态计算）
 
 // OpenClaw CLI 命令前缀：Docker 中用 node /app/dist/index.js，非 Docker 用 openclaw
 const OPENCLAW_CMD = 'openclaw';
@@ -38,13 +38,95 @@ const CONTENT_DEDUP_WINDOW_MS = 30000;
 // 流式防抖：等待流式写入完成后再执行，防止中间态消息提前触发
 const pendingOcfsExecutions = new Map(); // sessionKey -> { timer, msgId }
 const OCFS_DEBOUNCE_MS = parseInt(process.env.OCFS_DEBOUNCE_MS, 10) || 1500;
+const DEFAULT_AGENT = process.env.OCFS_ALLOWED_AGENTS ? process.env.OCFS_ALLOWED_AGENTS.split(',')[0] : 'ocfs-specialist';
 
 function saveProcessedId(cacheKey) {
     processedMessages.add(cacheKey);
     fs.appendFileSync(CACHE_FILE, cacheKey + '\n');
 }
 
-if (!fs.existsSync(BASE_DIR)) fs.mkdirSync(BASE_DIR, { recursive: true });
+// 获取 Agent 工作区缓存目录：允许映射指定代理独立根目录
+function getBaseDir(agentId) {
+    let mapping = {};
+    if (process.env.OCFS_WORKSPACE_MAP) {
+        try {
+            process.env.OCFS_WORKSPACE_MAP.split(',').forEach(pair => {
+                const parts = pair.split(':');
+                if (parts.length >= 2) {
+                    const key = parts[0].trim();
+                    const val = parts.slice(1).join(':').trim();
+                    if (key && val) mapping[key] = val;
+                }
+            });
+        } catch (e) {
+            console.error('[OCFS] 解析 OCFS_WORKSPACE_MAP 失败:', e);
+        }
+    }
+    const dir = mapping[agentId] || process.env.OCFS_WORKSPACE_DIR || '/home/node/.openclaw/workspace-ocfs';
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    return dir;
+}
+
+/**
+ * 智能提取 OCFS 代码块（支持嵌套代码块）
+ * 逐行扫描文本，追踪反引号嵌套深度，只在最外层配对闭合时截取。
+ * @param {string} text - 完整的消息文本
+ * @returns {string[]} - 提取到的 OCFS 块内容数组（不含开闭标记本身）
+ */
+function extractOcfsBlocks(text) {
+    if (!text) return [];
+    // 统一换行符，并按行分割
+    const lines = text.replace(/\r\n/g, '\n').split('\n');
+    const blocks = [];
+    let insideOcfs = false;
+    let openBacktickCount = 0; // 开启标记的反引号数量
+    let nestedDepth = 0;       // 内部嵌套代码块深度
+    let blockLines = [];
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmedLine = line.trim();
+
+        if (!insideOcfs) {
+            // 检测 OCFS 块开启：允许行首缩进，3+ 个反引号紧跟 ocfs
+            const openMatch = line.match(/^\s*(`{3,})ocfs/i);
+            if (openMatch) {
+                insideOcfs = true;
+                openBacktickCount = openMatch[1].length;
+                nestedDepth = 0;
+                blockLines = [];
+            }
+        } else {
+            // 已在 OCFS 块内，检测是否为反引号行
+            const backtickMatch = line.match(/^\s*(`{3,})(\s*)(\S*)/);
+            if (backtickMatch) {
+                const tickCount = backtickMatch[1].length;
+                const langTag = backtickMatch[3].trim(); // 反引号后的语言标签
+
+                if (tickCount >= openBacktickCount && !langTag && nestedDepth === 0) {
+                    // 闭合条件：反引号数 ≥ 开启数，无语言标签，且嵌套深度为 0
+                    insideOcfs = false;
+                    blocks.push(blockLines.join('\n'));
+                    blockLines = [];
+                } else if (langTag && !trimmedLine.includes(' ')) {
+                    // 仅当反引号后紧跟的是单词（无空格）时视为代码块开启，如 ```python
+                    // 排除类似 ``` write: file.txt 这种误报
+                    nestedDepth++;
+                    blockLines.push(line);
+                } else if (!langTag && nestedDepth > 0) {
+                    // 纯反引号行且有嵌套 → 关闭一层内部代码块
+                    nestedDepth--;
+                    blockLines.push(line);
+                } else {
+                    blockLines.push(line);
+                }
+            } else {
+                blockLines.push(line);
+            }
+        }
+    }
+    return blocks;
+}
 
 /**
  * 处理消息核心逻辑
@@ -52,8 +134,9 @@ if (!fs.existsSync(BASE_DIR)) fs.mkdirSync(BASE_DIR, { recursive: true });
 function processMessage(rawLine, sessionKey, agentId) {
     if (!rawLine || !agentId) return;
 
-    // 1. 严格身份准则：只处理来自 ocfs-specialist 专员会话的消息
-    if (agentId !== 'ocfs-specialist') return;
+    // 1. 严格身份准则：只处理来自配置的白名单 Agent 的消息
+    const allowedAgents = process.env.OCFS_ALLOWED_AGENTS ? process.env.OCFS_ALLOWED_AGENTS.split(',') : [DEFAULT_AGENT];
+    if (!allowedAgents.includes(agentId)) return;
 
     try {
         const data = JSON.parse(rawLine);
@@ -81,14 +164,15 @@ function processMessage(rawLine, sessionKey, agentId) {
 
         if (text && /```ocfs/i.test(text)) {
             // 流式防护：只处理包含完整闭合 ``` 的 OCFS 块，跳过流式中间消息（未闭合的块）
-            const ocfsBlocks = text.match(/```ocfs[\s\S]*?```/gi);
-            if (!ocfsBlocks || ocfsBlocks.length === 0) {
+            // 使用智能嵌套解析替代简单正则，避免内部代码块导致提前截断
+            const ocfsBlocks = extractOcfsBlocks(text);
+            if (ocfsBlocks.length === 0) {
                 console.log(`[OCFS] Skipping unclosed OCFS block in ${sessionKey}:${msgId} (likely streaming intermediate)`);
                 return;
             }
 
             // 内容级去重：对 OCFS 块内容计算哈希，30 秒内相同内容不重复执行
-            const normalizedBlocks = ocfsBlocks.map(b => b.replace(/```\s*$/g, '').replace(/^```ocfs\s*/gi, '').trim()).join('|||');
+            const normalizedBlocks = ocfsBlocks.map(b => b.trim()).join('|||');
             const contentHash = `${sessionKey}:ocfs:${crypto.createHash('md5').update(normalizedBlocks).digest('hex')}`;
             const now = Date.now();
             const lastSeen = recentContentHashes.get(contentHash);
@@ -121,7 +205,7 @@ function processMessage(rawLine, sessionKey, agentId) {
     }
 }
 
-async function handleNativeTool(sessionKey, toolName, argsObj, sendFeedback, agentId = 'ocfs-specialist') {
+async function handleNativeTool(sessionKey, toolName, argsObj, sendFeedback, agentId = DEFAULT_AGENT) {
     let token = process.env.OPENCLAW_GATEWAY_TOKEN || process.env.OPENCLAW_GATEWAY_PASSWORD;
     if (!token) {
         try {
@@ -161,10 +245,9 @@ async function handleNativeTool(sessionKey, toolName, argsObj, sendFeedback, age
     }
 }
 
-async function executeOcfs(text, sessionKey, agentId = 'ocfs-specialist') {
-    const regex = /```ocfs([\s\S]*?)```/gi;
-    let match;
+async function executeOcfs(text, sessionKey, agentId = DEFAULT_AGENT) {
     const tasks = [];
+    const baseDir = getBaseDir(agentId);
 
     // VCP 插件动态注册：每次执行前重新扫描插件目录，确保新增/删除的插件被感知
     loadVcpPlugins();
@@ -172,10 +255,12 @@ async function executeOcfs(text, sessionKey, agentId = 'ocfs-specialist') {
     const baseActions = [
         // 文件系统（直接实现）
         'ls', 'list', 'read', 'write', 'append', 'edit', 'grep', 'find',
-        // OpenClaw CLI 桥接
-        'exec', 'apply_patch', 'browser', 'message', 'cron', 'nodes',
+        // OpenClaw 原生工具（CLI 桥接或 Native API）
+        'exec', 'apply_patch', 'process', 'browser', 'canvas', 'message',
+        'cron', 'gateway', 'nodes', 'agents_list',
         'sessions_list', 'sessions_send', 'sessions_history', 'sessions_spawn',
-        'session_status', 'subagents', 'memory_search',
+        'session_status', 'subagents', 'memory_search', 'memory_get',
+        'image', 'tts',
         // 联网工具
         'web_search', 'web_fetch',
         // OCFS 独有
@@ -184,8 +269,10 @@ async function executeOcfs(text, sessionKey, agentId = 'ocfs-specialist') {
     const vcpNames = getVcpPluginNames().filter(n => !baseActions.includes(n));
     const knownActions = [...baseActions, ...vcpNames];
 
-    while ((match = regex.exec(text)) !== null) {
-        const block = match[1].trim();
+    // 使用智能嵌套解析提取 OCFS 块，替代简单正则
+    const ocfsBlockContents = extractOcfsBlocks(text);
+    for (const blockContent of ocfsBlockContents) {
+        const block = blockContent.trim();
         const lines = block.split('\n');
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
@@ -207,7 +294,7 @@ async function executeOcfs(text, sessionKey, agentId = 'ocfs-specialist') {
                 let nextIdx = i + 1;
                 while (nextIdx < lines.length) {
                     const nextLine = lines[nextIdx];
-                    const match = nextLine.match(/^([a-zA-Z]+):/);
+                    const match = nextLine.match(/^([a-zA-Z_]+):/);
                     if (match) {
                         const possibleAction = match[1].toLowerCase();
                         if (knownActions.includes(possibleAction)) {
@@ -218,7 +305,26 @@ async function executeOcfs(text, sessionKey, agentId = 'ocfs-specialist') {
                     nextIdx++;
                 }
                 i = nextIdx - 1;
-            } else if (action === 'write' || action === 'append' || action === 'edit') {
+            } else if (action === 'canvas' || action === 'gateway' || action === 'image' || action === 'process') {
+                // 这些工具的 target 是第一行冒号后的参数（如 canvas:present URL），content 是后续多行内容
+                target = remainder;
+                content = '';
+
+                let nextIdx = i + 1;
+                while (nextIdx < lines.length) {
+                    const nextLine = lines[nextIdx];
+                    const match = nextLine.match(/^([a-zA-Z_]+):/);
+                    if (match) {
+                        const possibleAction = match[1].toLowerCase();
+                        if (knownActions.includes(possibleAction)) {
+                            break;
+                        }
+                    }
+                    content += (content ? '\n' : '') + nextLine;
+                    nextIdx++;
+                }
+                i = nextIdx - 1;
+            } else if (action === 'write' || action === 'append' || action === 'edit' || action === 'apply_patch' || action === 'tts') {
                 // 支持引号包裹文件名，解决文件名含空格的问题
                 // 格式：write: "my file.md" content  或  write: 'my file.md' content
                 const quoteMatch = remainder.match(/^(["'])(.*?)\1\s*([\s\S]*)$/);
@@ -241,7 +347,7 @@ async function executeOcfs(text, sessionKey, agentId = 'ocfs-specialist') {
                 let nextIdx = i + 1;
                 while (nextIdx < lines.length) {
                     const nextLine = lines[nextIdx];
-                    const match = nextLine.match(/^([a-zA-Z]+):/);
+                    const match = nextLine.match(/^([a-zA-Z_]+):/);
                     if (match) {
                         const possibleAction = match[1].toLowerCase();
                         if (knownActions.includes(possibleAction)) {
@@ -253,9 +359,9 @@ async function executeOcfs(text, sessionKey, agentId = 'ocfs-specialist') {
                 }
                 i = nextIdx - 1;
             }
-            tasks.push({ action, target, content, fullPath: path.resolve(BASE_DIR, target) });
+            tasks.push({ action, target, content, fullPath: path.resolve(baseDir, target) });
         }
-    }
+    }  // end for ocfsBlockContents
 
     if (tasks.length === 0) {
         console.log('[OCFS] No tasks found in block');
@@ -339,8 +445,8 @@ async function executeOcfs(text, sessionKey, agentId = 'ocfs-specialist') {
             console.log(`[OCFS] Executing Action: ${action} on ${target}`);
 
             // 安全日志：记录跨越默认工作目录的文件操作（不再硬拦截）
-            const nonFsActions = ['exec', 'ocfs_fetch', 'ocfs_search', 'web_fetch', 'web_search', 'browser', 'message', 'cron', 'nodes', 'sessions_list', 'sessions_send', 'sessions_history', 'sessions_spawn', 'session_status', 'subagents', 'memory_search', 'apply_patch', 'find'];
-            if (fullPath !== BASE_DIR && !fullPath.startsWith(BASE_DIR + path.sep) && !nonFsActions.includes(action) && !vcpNames.includes(action)) {
+            const nonFsActions = ['exec', 'ocfs_fetch', 'ocfs_search', 'web_fetch', 'web_search', 'browser', 'canvas', 'message', 'cron', 'gateway', 'nodes', 'agents_list', 'sessions_list', 'sessions_send', 'sessions_history', 'sessions_spawn', 'session_status', 'subagents', 'memory_search', 'memory_get', 'apply_patch', 'find', 'process', 'image', 'tts'];
+            if (fullPath !== baseDir && !fullPath.startsWith(baseDir + path.sep) && !nonFsActions.includes(action) && !vcpNames.includes(action)) {
                 console.log(`[OCFS] Notice: 文件操作目标在默认工作目录之外 (${target})`);
             }
 
@@ -395,16 +501,16 @@ async function executeOcfs(text, sessionKey, agentId = 'ocfs-specialist') {
                 handleEdit(fullPath, content);
                 localSendFeedback(sessionKey, `✅ **EDIT**: \`${target}\` 局部修改成功。`);
             }
-            else if (action === 'ls' || action === 'list') handleList(sessionKey, target, null, localSendFeedback);
-            else if (action === 'read') handleRead(sessionKey, target, null, localSendFeedback);
-            else if (action === 'outline') handleOutline(sessionKey, target, null, localSendFeedback);
-            else if (action === 'grep') handleGrep(sessionKey, target, null, localSendFeedback);
+            else if (action === 'ls' || action === 'list') handleList(sessionKey, target, null, localSendFeedback, baseDir);
+            else if (action === 'read') handleRead(sessionKey, target, null, localSendFeedback, baseDir);
+            else if (action === 'outline') handleOutline(sessionKey, target, null, localSendFeedback, baseDir);
+            else if (action === 'grep') handleGrep(sessionKey, target, null, localSendFeedback, baseDir);
             // OCFS 独有工具
-            else if (action === 'ocfs_fetch') await handleWebFetch(sessionKey, target, null, localSendFeedback);
-            else if (action === 'ocfs_search') await handleGSearch(sessionKey, target, null, localSendFeedback);
+            else if (action === 'ocfs_fetch') await handleWebFetch(sessionKey, target, null, localSendFeedback, baseDir);
+            else if (action === 'ocfs_search') await handleGSearch(sessionKey, target, null, localSendFeedback, baseDir);
             else if (action === 'find') {
                 const docsDir = process.env.OCFS_DOCS_DIR || '/home/node/github/text';
-                await handleExec(sessionKey, `find ${docsDir} -name "${target.replace(/"/g, '\\"')}"`, null, localSendFeedback);
+                await handleExec(sessionKey, `find ${baseDir} ${docsDir} -name "${target.replace(/"/g, '\\"')}"`, null, localSendFeedback);
             }
             // exec 直接执行
             else if (action === 'exec') await handleExec(sessionKey, content, null, localSendFeedback);
@@ -449,6 +555,60 @@ async function executeOcfs(text, sessionKey, agentId = 'ocfs-specialist') {
                 await handleNativeTool(sessionKey, 'subagents', { action: subCmd, target: subTarget }, localSendFeedback, agentId);
             }
             else if (action === 'memory_search') await handleExec(sessionKey, `${OPENCLAW_CMD} memory search ${target}`, null, localSendFeedback);
+
+            // OpenClaw 原生 API 工具（通过 Gateway /tools/invoke）
+            else if (action === 'apply_patch') {
+                await handleNativeTool(sessionKey, 'apply_patch', { patch: content || target }, localSendFeedback, agentId);
+            }
+            else if (action === 'process') {
+                const parts = (content || target).trim().split(/\s+/);
+                const pArgs = { action: parts[0] };
+                if (parts[1]) pArgs.sessionId = parts[1];
+                // 传递额外参数（如 data、timeout 等）
+                const extraStr = parts.slice(2).join(' ');
+                if (extraStr) pArgs.data = extraStr;
+                await handleNativeTool(sessionKey, 'process', pArgs, localSendFeedback, agentId);
+            }
+            else if (action === 'memory_get') {
+                await handleNativeTool(sessionKey, 'memory_get', { path: target }, localSendFeedback, agentId);
+            }
+            else if (action === 'canvas') {
+                const parts = target.split(/\s+/);
+                const cArgs = { action: parts[0] };
+                // 传递 URL/target（用于 present、navigate 等）
+                if (parts.length > 1) cArgs.url = parts.slice(1).join(' ');
+                // 传递多行内容（用于 eval 的 javaScript 或 a2ui_push 的 jsonl）
+                if (content) {
+                    if (parts[0] === 'eval') cArgs.javaScript = content;
+                    else if (parts[0] === 'a2ui_push') cArgs.jsonl = content;
+                }
+                await handleNativeTool(sessionKey, 'canvas', cArgs, localSendFeedback, agentId);
+            }
+            else if (action === 'gateway') {
+                const parts = target.split(/\s+/);
+                const gArgs = { action: parts[0] };
+                if (content) gArgs.raw = content;
+                if (parts.length > 1) {
+                    // 解析简单的 key=value 参数
+                    for (let pi = 1; pi < parts.length; pi++) {
+                        const kv = parts[pi].split('=');
+                        if (kv.length === 2) gArgs[kv[0]] = kv[1];
+                    }
+                }
+                await handleNativeTool(sessionKey, 'gateway', gArgs, localSendFeedback, agentId);
+            }
+            else if (action === 'agents_list') {
+                await handleNativeTool(sessionKey, 'agents_list', {}, localSendFeedback, agentId);
+            }
+            else if (action === 'image') {
+                const imgArgs = { image: target };
+                if (content) imgArgs.prompt = content;
+                await handleNativeTool(sessionKey, 'image', imgArgs, localSendFeedback, agentId);
+            }
+            else if (action === 'tts') {
+                await handleNativeTool(sessionKey, 'tts', { text: content || target }, localSendFeedback, agentId);
+            }
+
             else if (openclawCoreCommands.includes(action)) await handleExec(sessionKey, `${OPENCLAW_CMD} ${action} ${target}`, null, localSendFeedback);
 
             // OCFS 内部功能与代理调用
